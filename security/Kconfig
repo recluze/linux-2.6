@@ -142,7 +142,7 @@ source security/smack/Kconfig
 source security/tomoyo/Kconfig
 
 source security/integrity/ima/Kconfig
-source security/basc/Kconfig
+source security/scbm/Kconfig
 
 choice
 	prompt "Default security module"
