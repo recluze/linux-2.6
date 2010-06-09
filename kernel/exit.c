@@ -1045,6 +1045,11 @@ EXPORT_SYMBOL(complete_and_exit);
 
 SYSCALL_DEFINE1(exit, int, error_code)
 {
+	struct task_struct *tsk = current;
+	int cur_pid; 
+
+ 	cur_pid = tsk->pid;
+	/* printk("recly: SYSCALL_DEFINE1(exit, %d, error_code)\n", cur_pid); */
 	do_exit((error_code&0xff)<<8);
 }
 
@@ -1086,6 +1091,7 @@ do_group_exit(int exit_code)
  */
 SYSCALL_DEFINE1(exit_group, int, error_code)
 {
+	// printk("recly: SYSCALL_DEFINE1(exit_group, int, error_code)\n");
 	do_group_exit((error_code & 0xff) << 8);
 	/* NOTREACHED */
 	return 0;
