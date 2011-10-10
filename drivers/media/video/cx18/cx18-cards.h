@@ -4,7 +4,7 @@
  *  Derived from ivtv-cards.c
  *
  *  Copyright (C) 2007  Hans Verkuil <hverkuil@xs4all.nl>
- *  Copyright (C) 2008  Andy Walls <awalls@radix.net>
+ *  Copyright (C) 2008  Andy Walls <awalls@md.metrocast.net>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -109,7 +109,7 @@ struct cx18_card_tuner {
 
 struct cx18_card_tuner_i2c {
 	unsigned short radio[2];/* radio tuner i2c address to probe */
-	unsigned short demod[2];/* demodulator i2c address to probe */
+	unsigned short demod[3];/* demodulator i2c address to probe */
 	unsigned short tv[4];	/* tv tuner i2c addresses to probe */
 };
 

@@ -33,6 +33,7 @@
 #include <linux/slab.h>
 #include <linux/syscalls.h>
 #include <linux/eeprom_93cx6.h>
+#include <linux/interrupt.h>
 
 #include "r8180_hw.h"
 #include "r8180.h"
@@ -61,20 +62,18 @@ static struct pci_device_id rtl8180_pci_id_tbl[] __devinitdata = {
 };
 
 
-static char *ifname = "wlan%d";
+static char ifname[IFNAMSIZ] = "wlan%d";
 static int hwseqnum = 0;
 static int hwwep = 0;
 static int channels = 0x3fff;
 
-#define eqMacAddr(a, b)		(((a)[0] == (b)[0] && (a)[1] == (b)[1] && (a)[2] == (b)[2] && (a)[3] == (b)[3] && (a)[4] == (b)[4] && (a)[5] == (b)[5]) ? 1 : 0)
-#define cpMacAddr(des, src)		((des)[0] = (src)[0], (des)[1] = (src)[1], (des)[2] = (src)[2], (des)[3] = (src)[3], (des)[4] = (src)[4], (des)[5] = (src)[5])
 MODULE_LICENSE("GPL");
 MODULE_DEVICE_TABLE(pci, rtl8180_pci_id_tbl);
 MODULE_AUTHOR("Andrea Merello <andreamrl@tiscali.it>");
 MODULE_DESCRIPTION("Linux driver for Realtek RTL8180 / RTL8185 WiFi cards");
 
 
-module_param(ifname, charp, S_IRUGO|S_IWUSR);
+module_param_string(ifname, ifname, sizeof(ifname), S_IRUGO|S_IWUSR);
 module_param(hwseqnum, int, S_IRUGO|S_IWUSR);
 module_param(hwwep, int, S_IRUGO|S_IWUSR);
 module_param(channels, int, S_IRUGO|S_IWUSR);
@@ -308,7 +307,7 @@ static int proc_get_stats_tx(char *page, char **start,
 void rtl8180_proc_module_init(void)
 {
 	DMESG("Initializing proc filesystem");
-	rtl8180_proc = create_proc_entry(RTL8180_MODULE_NAME, S_IFDIR, init_net.proc_net);
+	rtl8180_proc = proc_mkdir(RTL8180_MODULE_NAME, init_net.proc_net);
 }
 
 void rtl8180_proc_module_remove(void)
@@ -1593,7 +1592,7 @@ void rtl8180_rx(struct net_device *dev)
 		priv->RSSI = RSSI;
 		/* SQ translation formula is provided by SD3 DZ. 2006.06.27 */
 		if (quality >= 127)
-			quality = 1; /*0; */ /* 0 will cause epc to show signal zero , walk aroud now; */
+			quality = 1; /*0; */ /* 0 will cause epc to show signal zero , walk around now; */
 		else if (quality < 27)
 			quality = 100;
 		else
@@ -3549,6 +3548,7 @@ static int __devinit rtl8180_pci_probe(struct pci_dev *pdev,
 	struct net_device *dev = NULL;
 	struct r8180_priv *priv = NULL;
 	u8 unit = 0;
+	int ret = -ENODEV;
 
 	unsigned long pmem_start, pmem_len, pmem_flags;
 
@@ -3563,8 +3563,10 @@ static int __devinit rtl8180_pci_probe(struct pci_dev *pdev,
 	pci_set_dma_mask(pdev, 0xffffff00ULL);
 	pci_set_consistent_dma_mask(pdev, 0xffffff00ULL);
 	dev = alloc_ieee80211(sizeof(struct r8180_priv));
-	if (!dev)
-		return -ENOMEM;
+	if (!dev) {
+		ret = -ENOMEM;
+		goto fail_free;
+	}
 	priv = ieee80211_priv(dev);
 	priv->ieee80211 = netdev_priv(dev);
 
@@ -3611,7 +3613,7 @@ static int __devinit rtl8180_pci_probe(struct pci_dev *pdev,
 
 	if (dev_alloc_name(dev, ifname) < 0) {
 		DMESG("Oops: devname already taken! Trying wlan%%d...\n");
-		ifname = "wlan%d";
+		strcpy(ifname, "wlan%d");
 		dev_alloc_name(dev, ifname);
 	}
 
@@ -3643,11 +3645,12 @@ fail:
 		free_ieee80211(dev);
 	}
 
+fail_free:
 	pci_disable_device(pdev);
 
 	DMESG("wlan driver load failed\n");
 	pci_set_drvdata(pdev, NULL);
-	return -ENODEV;
+	return ret;
 }
 
 static void __devexit rtl8180_pci_remove(struct pci_dev *pdev)
@@ -3881,7 +3884,7 @@ void rtl8180_tx_isr(struct net_device *dev, int pri, short error)
 	 * If the packet previous of the nic pointer has been
 	 * processed this doesn't matter: it will be checked
 	 * here at the next round. Anyway if no more packet are
-	 * TXed no memory leak occour at all.
+	 * TXed no memory leak occur at all.
 	 */
 
 	switch (pri) {

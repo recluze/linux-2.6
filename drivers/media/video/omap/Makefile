@@ -3,5 +3,6 @@
 #
 
 # OMAP2/3 Display driver
-omap-vout-mod-objs := omap_vout.o omap_voutlib.o
-obj-$(CONFIG_VIDEO_OMAP2_VOUT) += omap-vout-mod.o
+omap-vout-y := omap_vout.o omap_voutlib.o
+omap-vout-$(CONFIG_VIDEO_OMAP2_VOUT_VRFB) += omap_vout_vrfb.o
+obj-$(CONFIG_VIDEO_OMAP2_VOUT) += omap-vout.o

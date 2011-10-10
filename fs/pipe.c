@@ -26,9 +26,14 @@
 
 /*
  * The max size that a non-root user is allowed to grow the pipe. Can
- * be set by root in /proc/sys/fs/pipe-max-pages
+ * be set by root in /proc/sys/fs/pipe-max-size
  */
-unsigned int pipe_max_pages = PIPE_DEF_BUFFERS * 16;
+unsigned int pipe_max_size = 1048576;
+
+/*
+ * Minimum pipe size, as required by POSIX
+ */
+unsigned int pipe_min_size = PAGE_SIZE;
 
 /*
  * We use a start+len construction, which provides full use of the 
@@ -377,7 +382,7 @@ pipe_read(struct kiocb *iocb, const struct iovec *_iov,
 			error = ops->confirm(pipe, buf);
 			if (error) {
 				if (!ret)
-					error = ret;
+					ret = error;
 				break;
 			}
 
@@ -436,7 +441,7 @@ redo:
 			break;
 		}
 		if (do_wakeup) {
-			wake_up_interruptible_sync(&pipe->wait);
+			wake_up_interruptible_sync_poll(&pipe->wait, POLLOUT | POLLWRNORM);
  			kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
 		}
 		pipe_wait(pipe);
@@ -445,7 +450,7 @@ redo:
 
 	/* Signal writers asynchronously that there is more room. */
 	if (do_wakeup) {
-		wake_up_interruptible_sync(&pipe->wait);
+		wake_up_interruptible_sync_poll(&pipe->wait, POLLOUT | POLLWRNORM);
 		kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
 	}
 	if (ret > 0)
@@ -607,7 +612,7 @@ redo2:
 			break;
 		}
 		if (do_wakeup) {
-			wake_up_interruptible_sync(&pipe->wait);
+			wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLRDNORM);
 			kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
 			do_wakeup = 0;
 		}
@@ -618,7 +623,7 @@ redo2:
 out:
 	mutex_unlock(&inode->i_mutex);
 	if (do_wakeup) {
-		wake_up_interruptible_sync(&pipe->wait);
+		wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLRDNORM);
 		kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
 	}
 	if (ret > 0)
@@ -710,7 +715,7 @@ pipe_release(struct inode *inode, int decr, int decw)
 	if (!pipe->readers && !pipe->writers) {
 		free_pipe_info(inode);
 	} else {
-		wake_up_interruptible_sync(&pipe->wait);
+		wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLOUT | POLLRDNORM | POLLWRNORM | POLLERR | POLLHUP);
 		kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
 		kill_fasync(&pipe->fasync_writers, SIGIO, POLL_OUT);
 	}
@@ -943,11 +948,13 @@ static const struct dentry_operations pipefs_dentry_operations = {
 
 static struct inode * get_pipe_inode(void)
 {
-	struct inode *inode = new_inode(pipe_mnt->mnt_sb);
+	struct inode *inode = new_inode_pseudo(pipe_mnt->mnt_sb);
 	struct pipe_inode_info *pipe;
 
 	if (!inode)
 		goto fail_inode;
+
+	inode->i_ino = get_next_ino();
 
 	pipe = alloc_pipe_info(inode);
 	if (!pipe)
@@ -992,12 +999,11 @@ struct file *create_write_pipe(int flags)
 		goto err;
 
 	err = -ENOMEM;
-	path.dentry = d_alloc(pipe_mnt->mnt_sb->s_root, &name);
+	path.dentry = d_alloc_pseudo(pipe_mnt->mnt_sb, &name);
 	if (!path.dentry)
 		goto err_inode;
 	path.mnt = mntget(pipe_mnt);
 
-	path.dentry->d_op = &pipefs_dentry_operations;
 	d_instantiate(path.dentry, inode);
 
 	err = -ENFILE;
@@ -1118,15 +1124,9 @@ SYSCALL_DEFINE1(pipe, int __user *, fildes)
  * Allocate a new array of pipe buffers and copy the info over. Returns the
  * pipe size if successful, or return -ERROR on error.
  */
-static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long arg)
+static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long nr_pages)
 {
 	struct pipe_buffer *bufs;
-
-	/*
-	 * Must be a power-of-2 currently
-	 */
-	if (!is_power_of_2(arg))
-		return -EINVAL;
 
 	/*
 	 * We can shrink the pipe, if arg >= pipe->nrbufs. Since we don't
@@ -1134,10 +1134,10 @@ static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long arg)
 	 * again like we would do for growing. If the pipe currently
 	 * contains more buffers than arg, then return busy.
 	 */
-	if (arg < pipe->nrbufs)
+	if (nr_pages < pipe->nrbufs)
 		return -EBUSY;
 
-	bufs = kcalloc(arg, sizeof(struct pipe_buffer), GFP_KERNEL);
+	bufs = kcalloc(nr_pages, sizeof(struct pipe_buffer), GFP_KERNEL);
 	if (unlikely(!bufs))
 		return -ENOMEM;
 
@@ -1146,20 +1146,68 @@ static long pipe_set_size(struct pipe_inode_info *pipe, unsigned long arg)
 	 * and adjust the indexes.
 	 */
 	if (pipe->nrbufs) {
-		const unsigned int tail = pipe->nrbufs & (pipe->buffers - 1);
-		const unsigned int head = pipe->nrbufs - tail;
+		unsigned int tail;
+		unsigned int head;
 
+		tail = pipe->curbuf + pipe->nrbufs;
+		if (tail < pipe->buffers)
+			tail = 0;
+		else
+			tail &= (pipe->buffers - 1);
+
+		head = pipe->nrbufs - tail;
 		if (head)
 			memcpy(bufs, pipe->bufs + pipe->curbuf, head * sizeof(struct pipe_buffer));
 		if (tail)
-			memcpy(bufs + head, pipe->bufs + pipe->curbuf, tail * sizeof(struct pipe_buffer));
+			memcpy(bufs + head, pipe->bufs, tail * sizeof(struct pipe_buffer));
 	}
 
 	pipe->curbuf = 0;
 	kfree(pipe->bufs);
 	pipe->bufs = bufs;
-	pipe->buffers = arg;
-	return arg;
+	pipe->buffers = nr_pages;
+	return nr_pages * PAGE_SIZE;
+}
+
+/*
+ * Currently we rely on the pipe array holding a power-of-2 number
+ * of pages.
+ */
+static inline unsigned int round_pipe_size(unsigned int size)
+{
+	unsigned long nr_pages;
+
+	nr_pages = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	return roundup_pow_of_two(nr_pages) << PAGE_SHIFT;
+}
+
+/*
+ * This should work even if CONFIG_PROC_FS isn't set, as proc_dointvec_minmax
+ * will return an error.
+ */
+int pipe_proc_fn(struct ctl_table *table, int write, void __user *buf,
+		 size_t *lenp, loff_t *ppos)
+{
+	int ret;
+
+	ret = proc_dointvec_minmax(table, write, buf, lenp, ppos);
+	if (ret < 0 || !write)
+		return ret;
+
+	pipe_max_size = round_pipe_size(pipe_max_size);
+	return ret;
+}
+
+/*
+ * After the inode slimming patch, i_pipe/i_bdev/i_cdev share the same
+ * location, so checking ->i_pipe is not enough to verify that this is a
+ * pipe.
+ */
+struct pipe_inode_info *get_pipe_info(struct file *file)
+{
+	struct inode *i = file->f_path.dentry->d_inode;
+
+	return S_ISFIFO(i->i_mode) ? i->i_pipe : NULL;
 }
 
 long pipe_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
@@ -1167,30 +1215,32 @@ long pipe_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct pipe_inode_info *pipe;
 	long ret;
 
-	pipe = file->f_path.dentry->d_inode->i_pipe;
+	pipe = get_pipe_info(file);
 	if (!pipe)
 		return -EBADF;
 
 	mutex_lock(&pipe->inode->i_mutex);
 
 	switch (cmd) {
-	case F_SETPIPE_SZ:
-		if (!capable(CAP_SYS_ADMIN) && arg > pipe_max_pages) {
-			ret = -EINVAL;
+	case F_SETPIPE_SZ: {
+		unsigned int size, nr_pages;
+
+		size = round_pipe_size(arg);
+		nr_pages = size >> PAGE_SHIFT;
+
+		ret = -EINVAL;
+		if (!nr_pages)
+			goto out;
+
+		if (!capable(CAP_SYS_RESOURCE) && size > pipe_max_size) {
+			ret = -EPERM;
 			goto out;
 		}
-		/*
-		 * The pipe needs to be at least 2 pages large to
-		 * guarantee POSIX behaviour.
-		 */
-		if (arg < 2) {
-			ret = -EINVAL;
-			goto out;
-		}
-		ret = pipe_set_size(pipe, arg);
+		ret = pipe_set_size(pipe, nr_pages);
 		break;
+		}
 	case F_GETPIPE_SZ:
-		ret = pipe->buffers;
+		ret = pipe->buffers * PAGE_SIZE;
 		break;
 	default:
 		ret = -EINVAL;
@@ -1202,22 +1252,26 @@ out:
 	return ret;
 }
 
+static const struct super_operations pipefs_ops = {
+	.destroy_inode = free_inode_nonrcu,
+};
+
 /*
  * pipefs should _never_ be mounted by userland - too much of security hassle,
  * no real gain from having the whole whorehouse mounted. So we don't need
  * any operations on the root directory. However, we need a non-trivial
  * d_name - pipe: will go nicely and kill the special-casing in procfs.
  */
-static int pipefs_get_sb(struct file_system_type *fs_type,
-			 int flags, const char *dev_name, void *data,
-			 struct vfsmount *mnt)
+static struct dentry *pipefs_mount(struct file_system_type *fs_type,
+			 int flags, const char *dev_name, void *data)
 {
-	return get_sb_pseudo(fs_type, "pipe:", NULL, PIPEFS_MAGIC, mnt);
+	return mount_pseudo(fs_type, "pipe:", &pipefs_ops,
+			&pipefs_dentry_operations, PIPEFS_MAGIC);
 }
 
 static struct file_system_type pipe_fs_type = {
 	.name		= "pipefs",
-	.get_sb		= pipefs_get_sb,
+	.mount		= pipefs_mount,
 	.kill_sb	= kill_anon_super,
 };
 
@@ -1237,8 +1291,8 @@ static int __init init_pipe_fs(void)
 
 static void __exit exit_pipe_fs(void)
 {
+	kern_unmount(pipe_mnt);
 	unregister_filesystem(&pipe_fs_type);
-	mntput(pipe_mnt);
 }
 
 fs_initcall(init_pipe_fs);
